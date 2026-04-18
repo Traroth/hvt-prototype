@@ -1,9 +1,92 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
-  <modelVersion>4.0.0</modelVersion>
-  <groupId>fr.dufrenoy.hvt</groupId>
-  <artifactId>hvt-prototype</artifactId>
-  <version>1.0-SNAPSHOT</version>
-  <name>Archetype - hvt-prototype</name>
-  <url>http://maven.apache.org</url>
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>fr.dufrenoy</groupId>
+    <artifactId>hvt-prototype</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>hvt-prototype</name>
+    <description>
+        Proof of concept for Heterogeneous Virtual Threads — demonstrating the
+        feasibility of the proposed HVT stack: SPIR-V kernel compilation via
+        the Beehive SPIR-V Toolkit and GPU dispatch via Vulkan Compute using Project Panama.
+    </description>
+
+    <licenses>
+        <license>
+            <name>MIT License</name>
+            <url>https://opensource.org/licenses/MIT</url>
+        </license>
+    </licenses>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Dependency versions -->
+        <beehive.spirv.version>0.0.5</beehive.spirv.version>
+        <junit.version>5.11.0</junit.version>
+
+        <!-- Plugin versions -->
+        <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
+        <maven.surefire.plugin.version>3.3.1</maven.surefire.plugin.version>
+    </properties>
+
+    <dependencies>
+
+        <!-- Beehive SPIR-V Toolkit — SPIR-V code generation from Java -->
+        <!-- https://github.com/beehive-lab/beehive-spirv-toolkit -->
+        <dependency>
+            <groupId>beehive-lab</groupId>
+            <artifactId>beehive-spirv-lib</artifactId>
+            <version>${beehive.spirv.version}</version>
+        </dependency>
+
+        <!-- JUnit 5 — integration tests -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>${maven.compiler.plugin.version}</version>
+                <configuration>
+                    <release>25</release>
+                    <!-- Required for Panama Foreign Function & Memory API -->
+                    <compilerArgs>
+                        <arg>--enable-preview</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven.surefire.plugin.version}</version>
+                <configuration>
+                    <argLine>
+                        <!-- Panama: allow access to native memory -->
+                        --enable-native-access=ALL-UNNAMED
+                        --enable-preview
+                    </argLine>
+                </configuration>
+            </plugin>
+
+        </plugins>
+    </build>
+
 </project>

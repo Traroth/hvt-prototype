@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mvn dependency:resolve -U)",
+      "Bash(mvn dependency:resolve)",
+      "Bash(xargs head *)",
+      "Bash(sed 's/[0-9]*$//')",
+      "Bash(mvn compile *)"
+    ]
+  }
+}

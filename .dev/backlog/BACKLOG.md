@@ -7,18 +7,17 @@ the end of each session.
 
 ## Project-wide
 
-- [ ] Generate Panama/jextract bindings for OpenCL headers
-- [ ] Configure `pom.xml` with all required dependencies (Beehive SPIR-V Toolkit, JUnit 5)
-- [ ] Verify OpenCL + SPIR-V support on target GPU (NVIDIA GTX 1080, driver version TBD)
+- [x] Generate Panama/jextract bindings for Vulkan headers (jextract 25, Vulkan SDK 1.4.341.1, 2346 files → `fr.dufrenoy.hvt.runtime.vulkan`)
+- [x] Configure `pom.xml` with all required dependencies (beehive-lab:beehive-spirv-lib:0.0.5 installé localement, JUnit 5.11.0)
 - [ ] Write `README.md`
 
 ---
 
 ## HVT API (`fr.dufrenoy.hvt.api`)
 
-- [ ] Implement `HvtMemory<T>` with `TransferMode` semantics
-- [ ] Implement `AcceleratorType` enum (GPU, CPU fallback)
-- [ ] Implement `HvtThread` façade with `.preferring()` / `.fallbackTo()` builder
+- [x] Implement `HvtMemory<T>` with `TransferMode` semantics
+- [x] Implement `AcceleratorType` enum (GPU, CPU fallback)
+- [x] Implement `HvtThread` façade with `.preferring()` / `.fallbackTo()` builder
 
 ---
 
@@ -31,16 +30,17 @@ the end of each session.
 
 ## Runtime (`fr.dufrenoy.hvt.runtime`)
 
-- [ ] Implement `HvtCarrierRegistry` — OpenCL device discovery via Panama
-- [ ] Implement `KernelDispatcher` — submits SPIR-V to OpenCL command queue via Panama
+- [ ] Implement `HvtCarrierRegistry` — Vulkan device discovery via Panama
+- [ ] Implement `KernelDispatcher` — submits SPIR-V to Vulkan compute queue via Panama
 
 ---
 
 ## Error model (`fr.dufrenoy.hvt.error`)
 
 - [ ] Implement `HvtErrorBuffer` — device-resident error code with atomic write
-- [ ] Implement `HvtKernelException`
+- [x] Implement `HvtKernelException`
 - [ ] Integration test: kernel signalling error does not transfer output data
+- [ ] Handle hardware faults via Vulkan error codes (device OOM, driver timeout)
 
 ---
 
@@ -53,4 +53,4 @@ the end of each session.
 
 ## Done
 
-(nothing yet)
+- [x] Verify Vulkan 1.3 + SPIR-V support on target GPU (NVIDIA GTX 1080)
