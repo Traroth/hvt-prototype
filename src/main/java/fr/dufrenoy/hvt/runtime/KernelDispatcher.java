@@ -313,6 +313,104 @@ final class KernelDispatcher {
     }
 
     /**
+     * Submits the {@code bilinearZoom} kernel once and writes wall-clock timings
+     * for the three pipeline phases into {@code timingsNs}:
+     * <ul>
+     *   <li>{@code timingsNs[0]} — host→device upload ({@code vkMapMemory} + copy)</li>
+     *   <li>{@code timingsNs[1]} — GPU compute ({@code vkQueueSubmit} + {@code vkQueueWaitIdle})</li>
+     *   <li>{@code timingsNs[2]} — device→host download ({@code vkMapMemory} + copy)</li>
+     * </ul>
+     *
+     * @param memories   same convention as {@link #submit}
+     * @param timingsNs  output array of length ≥ 3; each element is overwritten
+     */
+    static synchronized void submitTimed(HvtMemory<?>[] memories, long[] timingsNs) {
+        int[]         params   = (int[]) memories[2].get();
+        long          srcBytes = memories[0].segment().byteSize();
+        long          dstBytes = memories[1].segment().byteSize();
+        MemorySegment dev      = HvtCarrierRegistry.device();
+
+        try (Arena tmp = Arena.ofConfined()) {
+
+            // ── Step 2: allocate device buffers ───────────────────────────────
+            MemorySegment pSrcBuf = tmp.allocate(vulkan_h.C_POINTER);
+            MemorySegment pSrcMem = tmp.allocate(vulkan_h.C_POINTER);
+            allocateBuffer(tmp, dev, srcBytes, pSrcBuf, pSrcMem);
+            MemorySegment srcBuf = pSrcBuf.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            MemorySegment srcMem = pSrcMem.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+
+            MemorySegment pDstBuf = tmp.allocate(vulkan_h.C_POINTER);
+            MemorySegment pDstMem = tmp.allocate(vulkan_h.C_POINTER);
+            allocateBuffer(tmp, dev, dstBytes, pDstBuf, pDstMem);
+            MemorySegment dstBuf = pDstBuf.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            MemorySegment dstMem = pDstMem.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+
+            // ── Step 3: upload (timed) ────────────────────────────────────────
+            long t0 = System.nanoTime();
+            mapCopy(tmp, dev, srcMem, srcBytes, memories[0].segment(), true);
+            timingsNs[0] = System.nanoTime() - t0;
+
+            // ── Step 3b: allocate and zero the error buffer ───────────────────
+            MemorySegment pErrBuf = tmp.allocate(vulkan_h.C_POINTER);
+            MemorySegment pErrMem = tmp.allocate(vulkan_h.C_POINTER);
+            allocateBuffer(tmp, dev, 4L, pErrBuf, pErrMem);
+            MemorySegment errBuf = pErrBuf.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            MemorySegment errMem = pErrMem.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            mapCopy(tmp, dev, errMem, 4L, tmp.allocate(ValueLayout.JAVA_INT), true);
+
+            // ── Step 4: descriptor pool + descriptor set ──────────────────────
+            MemorySegment pPool = tmp.allocate(vulkan_h.C_POINTER);
+            MemorySegment pSet  = tmp.allocate(vulkan_h.C_POINTER);
+            buildDescriptorSet(tmp, dev, srcBuf, srcBytes, dstBuf, dstBytes, errBuf, pPool, pSet);
+            MemorySegment pool = pPool.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            MemorySegment set  = pSet.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+
+            // ── Step 5: record command buffer ─────────────────────────────────
+            MemorySegment pCmdBuf = tmp.allocate(vulkan_h.C_POINTER);
+            recordCommandBuffer(tmp, dev, set, params, pCmdBuf);
+
+            // ── Step 6: submit + wait (timed) ─────────────────────────────────
+            MemorySegment submitInfo = tmp.allocate(VkSubmitInfo.layout());
+            VkSubmitInfo.sType(submitInfo, STYPE_SUBMIT_INFO);
+            VkSubmitInfo.pNext(submitInfo, MemorySegment.NULL);
+            VkSubmitInfo.waitSemaphoreCount(submitInfo, 0);
+            VkSubmitInfo.pWaitSemaphores(submitInfo, MemorySegment.NULL);
+            VkSubmitInfo.pWaitDstStageMask(submitInfo, MemorySegment.NULL);
+            VkSubmitInfo.commandBufferCount(submitInfo, 1);
+            VkSubmitInfo.pCommandBuffers(submitInfo, pCmdBuf);
+            VkSubmitInfo.signalSemaphoreCount(submitInfo, 0);
+            VkSubmitInfo.pSignalSemaphores(submitInfo, MemorySegment.NULL);
+            t0 = System.nanoTime();
+            checkVulkan(
+                    vulkan_h.vkQueueSubmit(
+                            HvtCarrierRegistry.queue(), 1, submitInfo, MemorySegment.NULL),
+                    "vkQueueSubmit");
+            checkVulkan(vulkan_h.vkQueueWaitIdle(HvtCarrierRegistry.queue()), "vkQueueWaitIdle");
+            timingsNs[1] = System.nanoTime() - t0;
+
+            // ── Step 6b: check error code ─────────────────────────────────────
+            MemorySegment errHostSeg = tmp.allocate(ValueLayout.JAVA_INT);
+            mapCopy(tmp, dev, errMem, 4L, errHostSeg, false);
+            HvtErrorBuffer.ofCode(errHostSeg.get(ValueLayout.JAVA_INT, 0)).checkAndThrow();
+
+            // ── Step 7: download (timed) ──────────────────────────────────────
+            t0 = System.nanoTime();
+            mapCopy(tmp, dev, dstMem, dstBytes, memories[1].segment(), false);
+            timingsNs[2] = System.nanoTime() - t0;
+
+            // ── Step 8: per-call cleanup ──────────────────────────────────────
+            vulkan_h.vkFreeCommandBuffers(dev, CMD_POOL, 1, pCmdBuf);
+            vulkan_h.vkDestroyDescriptorPool(dev, pool, MemorySegment.NULL);
+            vulkan_h.vkFreeMemory(dev, errMem, MemorySegment.NULL);
+            vulkan_h.vkDestroyBuffer(dev, errBuf, MemorySegment.NULL);
+            vulkan_h.vkFreeMemory(dev, srcMem, MemorySegment.NULL);
+            vulkan_h.vkDestroyBuffer(dev, srcBuf, MemorySegment.NULL);
+            vulkan_h.vkFreeMemory(dev, dstMem, MemorySegment.NULL);
+            vulkan_h.vkDestroyBuffer(dev, dstBuf, MemorySegment.NULL);
+        }
+    }
+
+    /**
      * Destroys all static Vulkan resources owned by this class.
      * Must be called by {@link HvtCarrierRegistry}'s shutdown hook before
      * {@code vkDestroyDevice}, so that the device handle is still valid.

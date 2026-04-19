@@ -80,12 +80,24 @@ repository before building. It is not available on Maven Central.
 ## Building and running
 
 ```bash
-# Build and run all tests (including GPU integration tests and benchmarks)
+# Build and run all tests (including GPU integration tests and quick benchmarks)
 mvn test
+
+# Build the JMH benchmark jar
+mvn package
+
+# Run JMH benchmarks (GPU required for gpuSingle and gpuBatch)
+java --enable-native-access=ALL-UNNAMED --enable-preview -jar target/benchmarks.jar
 ```
 
-GPU tests skip automatically if no compute-capable Vulkan device is found. The benchmark always
-runs the CPU path and logs a `[HVT Benchmark]` / `[HVT Batch Benchmark]` line regardless.
+GPU tests skip automatically if no compute-capable Vulkan device is found. The quick benchmark
+(`BilinearZoomBenchmarkTest`) always runs the CPU path and logs a `[HVT Benchmark]` /
+`[HVT Batch Benchmark]` line regardless.
+
+The JMH benchmark (`HvtBenchmark`) runs three benchmarks: `cpuSingle`, `gpuSingle`, and
+`gpuBatch` (20 iterations with persistent device buffers). The setup phase warms up the Vulkan
+driver with 3 dispatches and logs a `[Phase breakdown]` line decomposing the single-dispatch
+time into upload, compute, and download.
 
 ---
 

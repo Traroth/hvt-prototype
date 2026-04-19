@@ -9,6 +9,7 @@ the end of each session.
 
 - [x] Generate Panama/jextract bindings for Vulkan headers (jextract 25, Vulkan SDK 1.4.341.1, 2346 files → `fr.dufrenoy.hvt.runtime.vulkan`)
 - [x] Configure `pom.xml` with all required dependencies (beehive-lab:beehive-spirv-lib:0.0.5 installé localement, JUnit 5.11.0)
+- [x] Configure JMH 1.37 + maven-shade-plugin in `pom.xml` — produces `target/benchmarks.jar` via `mvn package`
 - [x] Write `README.md`
 
 ---
@@ -32,6 +33,7 @@ the end of each session.
 
 - [x] Implement `HvtCarrierRegistry` — Vulkan device discovery via Panama
 - [x] Implement `KernelDispatcher` — submits SPIR-V to Vulkan compute queue via Panama
+- [x] Add `KernelDispatcher.submitTimed()` — phase decomposition (upload / compute / download) for JMH setup logging
 
 ---
 
@@ -48,6 +50,7 @@ the end of each session.
 
 - [x] End-to-end test: `bilinearZoom` on GPU produces correct output
 - [x] Benchmark: GPU vs. sequential CPU speedup on 3840×2160 image (log result) — single-run: 2.4×, batch ×20 (device buffers persistent): 15.5×
+- [x] JMH benchmark (`HvtBenchmark`) — `cpuSingle`, `gpuSingle`, `gpuBatch` ×20, GPU warm-up (3 dispatches) + phase breakdown logging in setup — run via `java -jar target/benchmarks.jar`
 
 ---
 
