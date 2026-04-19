@@ -27,6 +27,7 @@
 package fr.dufrenoy.hvt.api;
 
 import fr.dufrenoy.hvt.error.HvtKernelException;
+import fr.dufrenoy.hvt.runtime.HvtCarrierRegistry;
 
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -203,8 +204,7 @@ public final class HvtThread {
                                      AcceleratorType fallback,
                                      HvtKernel kernel,
                                      HvtMemory<?>[] memories) {
-            // TODO: delegate to HvtCarrierRegistry.dispatch(preferred, fallback, kernel, memories)
-            kernel.execute(memories);
+            HvtCarrierRegistry.dispatch(preferred, fallback, kernel, memories);
         }
     }
 }

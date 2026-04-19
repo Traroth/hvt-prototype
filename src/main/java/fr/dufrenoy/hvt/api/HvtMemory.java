@@ -200,27 +200,27 @@ public final class HvtMemory<T> implements AutoCloseable {
         arena.close();
     }
 
-    // ─── Package-private accessors for the runtime layer ──────────────────────
+    // ─── Public accessors for the runtime dispatch layer ──────────────────────
 
     /**
      * Returns the off-heap {@link MemorySegment} backing this buffer.
      * Used by the runtime to upload/download data to/from the device.
      */
-    MemorySegment segment() {
+    public MemorySegment segment() {
         return segment;
     }
 
     /**
      * Returns the {@link TransferMode} governing this buffer's transfer behaviour.
      */
-    TransferMode transferMode() {
+    public TransferMode transferMode() {
         return mode;
     }
 
     /**
      * Returns the number of elements in this buffer.
      */
-    long elementCount() {
+    public long elementCount() {
         return elementCount;
     }
 }

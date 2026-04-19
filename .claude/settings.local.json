@@ -5,7 +5,15 @@
       "Bash(mvn dependency:resolve)",
       "Bash(xargs head *)",
       "Bash(sed 's/[0-9]*$//')",
-      "Bash(mvn compile *)"
+      "Bash(mvn compile *)",
+      "Bash(jar tf *)",
+      "Bash(unzip -l \"/c/Users/PC/.m2/repository/beehive-lab/beehive-spirv-lib/0.0.5/beehive-spirv-lib-0.0.5.jar\")",
+      "Bash(grep \"\\\\.class$\")",
+      "Bash(unzip -l \"/c/Users/PC/.m2/repository/beehive-lab/beehive-spirv-generator/0.0.5/beehive-spirv-generator-0.0.5.jar\")",
+      "Bash(xargs grep *)",
+      "Bash(spirv-val --version)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(mvn test *)"
     ]
   }
 }
