@@ -34,6 +34,8 @@ the end of each session.
 - [x] Implement `HvtCarrierRegistry` — Vulkan device discovery via Panama
 - [x] Implement `KernelDispatcher` — submits SPIR-V to Vulkan compute queue via Panama
 - [x] Add `KernelDispatcher.submitTimed()` — phase decomposition (upload / compute / download) for JMH setup logging
+- [x] Async GPU dispatch — `KernelDispatcher.submit()` uses `VkFence` + `LockSupport.park()` instead of `vkQueueWaitIdle`; carrier thread freed during GPU execution
+- [x] Implement `GpuCompletionScheduler` — daemon thread polling `VkFence` handles, unparks waiting virtual threads on completion
 
 ---
 
@@ -51,6 +53,7 @@ the end of each session.
 - [x] End-to-end test: `bilinearZoom` on GPU produces correct output
 - [x] Benchmark: GPU vs. sequential CPU speedup on 3840×2160 image (log result) — single-run: 2.4×, batch ×20 (device buffers persistent): 15.5×
 - [x] JMH benchmark (`HvtBenchmark`) — `cpuSingle`, `gpuSingle`, `gpuBatch` ×20, GPU warm-up (3 dispatches) + phase breakdown logging in setup — run via `java -jar target/benchmarks.jar`
+- [x] Concurrency test — `two_virtual_threads_dispatch_concurrently`: two virtual threads park on GPU simultaneously, both get correct results
 
 ---
 

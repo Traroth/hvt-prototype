@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -197,6 +198,53 @@ class KernelDispatcherIntegrationTest {
             assertThrows(HvtKernelException.class, () -> t.join());
             // Kernel threw before writing anything; output buffer is still all zeros
             assertArrayEquals(new int[4], dstMem.get());
+        }
+    }
+
+    /**
+     * Two virtual threads dispatch to the GPU concurrently via
+     * {@link KernelDispatcher#submit}. Both park while the GPU executes —
+     * the carrier thread is free to run other virtual threads in the interval.
+     * Both dispatches must complete with pixel-correct results, proving that
+     * the {@code VkFence} + {@link java.util.concurrent.locks.LockSupport#park}
+     * mechanism works end-to-end under concurrent access.
+     */
+    @Test
+    void two_virtual_threads_dispatch_concurrently() throws InterruptedException {
+        assumeGpu();
+
+        int srcW = 4, srcH = 4, dstW = 2, dstH = 2;
+        int[] src = {
+            grey(0),   grey(16),  grey(32),  grey(48),
+            grey(64),  grey(80),  grey(96),  grey(112),
+            grey(128), grey(144), grey(160), grey(176),
+            grey(192), grey(208), grey(224), grey(240)
+        };
+
+        int[][]     results = new int[2][];
+        Throwable[] errors  = new Throwable[2];
+
+        Thread t1 = Thread.ofVirtual().start(() -> {
+            try { results[0] = zoom(src, srcW, srcH, dstW, dstH); }
+            catch (Throwable e) { errors[0] = e; }
+        });
+        Thread t2 = Thread.ofVirtual().start(() -> {
+            try { results[1] = zoom(src, srcW, srcH, dstW, dstH); }
+            catch (Throwable e) { errors[1] = e; }
+        });
+
+        t1.join();
+        t2.join();
+
+        assertNull(errors[0], () -> "virtual thread 1 failed: " + errors[0]);
+        assertNull(errors[1], () -> "virtual thread 2 failed: " + errors[1]);
+
+        for (int dy = 0; dy < dstH; dy++) {
+            for (int dx = 0; dx < dstW; dx++) {
+                int ref = bilinearRef(src, srcW, srcH, dx, dy, dstW, dstH);
+                assertPixel(ref, results[0][dy * dstW + dx], BILINEAR_TOLERANCE, dx, dy);
+                assertPixel(ref, results[1][dy * dstW + dx], BILINEAR_TOLERANCE, dx, dy);
+            }
         }
     }
 

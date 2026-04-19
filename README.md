@@ -27,8 +27,9 @@ HVT API façade  (HvtThread / HvtMemory / TransferMode)
 HvtCarrierRegistry  —  Vulkan device discovery via Panama
     │
     ▼
-KernelDispatcher  —  submits SPIR-V to Vulkan compute queue via Panama
-    │
+KernelDispatcher  —  submits SPIR-V + VkFence; parks virtual thread
+    │                  (carrier thread freed during GPU execution)
+    │◄── GpuCompletionScheduler  —  polls fence, unparks on completion
     ▼
 KernelCompiler  —  generates SPIR-V binary via Beehive SPIR-V Toolkit
     │
@@ -42,7 +43,7 @@ Vulkan Compute runtime  —  executes on GPU
 |---|---|
 | `fr.dufrenoy.hvt.api` | `HvtThread`, `HvtMemory`, `TransferMode`, `AcceleratorType` |
 | `fr.dufrenoy.hvt.kernel` | `KernelCompiler` — SPIR-V code generation |
-| `fr.dufrenoy.hvt.runtime` | `HvtCarrierRegistry`, `KernelDispatcher` — Vulkan dispatch |
+| `fr.dufrenoy.hvt.runtime` | `HvtCarrierRegistry`, `KernelDispatcher`, `GpuCompletionScheduler` — Vulkan dispatch + async completion |
 | `fr.dufrenoy.hvt.runtime.vulkan` | Panama/jextract bindings for Vulkan — do not edit |
 | `fr.dufrenoy.hvt.error` | `HvtErrorBuffer`, `HvtKernelException` |
 
@@ -50,7 +51,8 @@ Vulkan Compute runtime  —  executes on GPU
 
 ## Results
 
-Kernel: bilinear zoom, 1920×1080 → 3840×2160 (8.3 M output pixels). Target: NVIDIA GTX 1080.
+Kernel: bilinear zoom, 1920×1080 → 3840×2160 (8.3 M output pixels).
+Hardware: Intel Core i7-8700K (3.7 GHz), 32 GB RAM, NVIDIA GTX 1080 (8 GB GDDR5X, PCIe 3.0 ×16), driver 576.52 DCH.
 
 | Mode | GPU | CPU (sequential Java) | Speedup |
 |---|---|---|---|

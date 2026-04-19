@@ -40,6 +40,7 @@ import fr.dufrenoy.hvt.runtime.vulkan.VkDescriptorPoolSize;
 import fr.dufrenoy.hvt.runtime.vulkan.VkDescriptorSetAllocateInfo;
 import fr.dufrenoy.hvt.runtime.vulkan.VkDescriptorSetLayoutBinding;
 import fr.dufrenoy.hvt.runtime.vulkan.VkDescriptorSetLayoutCreateInfo;
+import fr.dufrenoy.hvt.runtime.vulkan.VkFenceCreateInfo;
 import fr.dufrenoy.hvt.runtime.vulkan.VkMemoryAllocateInfo;
 import fr.dufrenoy.hvt.runtime.vulkan.VkMemoryRequirements;
 import fr.dufrenoy.hvt.runtime.vulkan.VkMemoryType;
@@ -55,6 +56,8 @@ import fr.dufrenoy.hvt.runtime.vulkan.vulkan_h;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * Submits the {@code bilinearZoom} SPIR-V kernel to the Vulkan compute queue.
@@ -67,10 +70,18 @@ import java.lang.foreign.ValueLayout;
  * command buffer) are created inside {@link #submit} and destroyed before it returns.
  *
  * <p>Memory strategy: host-visible + host-coherent for all buffers; no staging
- * buffers required. {@code vkQueueWaitIdle} is the completion barrier.
+ * buffers required.
  *
- * <p><b>Thread safety:</b> {@link #submit} is {@code synchronized} on the class
- * monitor because the shared {@code VkCommandPool} is not externally synchronised.
+ * <p>{@link #submit} submits work to the GPU with a {@code VkFence}, then parks
+ * the calling thread via {@link LockSupport#park}. {@link GpuCompletionScheduler}
+ * polls the fence on a dedicated daemon thread and unparks the caller when the GPU
+ * signals completion. The carrier thread is free to run other virtual threads during
+ * GPU execution — this is the key HVT property demonstrated by this prototype.
+ *
+ * <p><b>Thread safety:</b> {@code submit} uses two explicit {@code synchronized}
+ * blocks on the class monitor (one for setup + dispatch, one for teardown), with
+ * the park between them. The shared {@code VkCommandPool} is thus never accessed
+ * concurrently.
  */
 final class KernelDispatcher {
 
@@ -89,6 +100,7 @@ final class KernelDispatcher {
     private static final int STYPE_WRITE_DESCRIPTOR_SET              = 35;
     private static final int STYPE_BUFFER_CREATE_INFO                = 12;
     private static final int STYPE_MEMORY_ALLOCATE_INFO              = 5;
+    private static final int STYPE_FENCE_CREATE_INFO                 = 8;
     private static final int STYPE_SUBMIT_INFO                       = 4;
 
     // ─── Static Vulkan resources ──────────────────────────────────────────────
@@ -118,11 +130,34 @@ final class KernelDispatcher {
 
     private KernelDispatcher() {}
 
+    // ─── Dispatch context ─────────────────────────────────────────────────────
+
+    /**
+     * Carries all per-dispatch Vulkan handles across the park boundary between
+     * {@link #beginDispatch} (Phase 1) and {@link #finishDispatch} (Phase 2).
+     */
+    private record DispatchContext(
+            Arena         fenceArena,  // owns pFenceSlot; closed in finishDispatch
+            MemorySegment pFenceSlot,  // &VkFence — read by GpuCompletionScheduler
+            MemorySegment fence,       // VkFence handle — passed to vkDestroyFence
+            MemorySegment srcBuf,      MemorySegment srcMem,
+            MemorySegment dstBuf,      MemorySegment dstMem,  long dstBytes,
+            MemorySegment errBuf,      MemorySegment errMem,
+            MemorySegment pool,        // VkDescriptorPool
+            MemorySegment cmdBuf,      // VkCommandBuffer handle
+            AtomicBoolean done         // set by scheduler before unpark
+    ) {}
+
     // ─── Public entrypoint ────────────────────────────────────────────────────
 
     /**
-     * Submits the {@code bilinearZoom} kernel to the GPU and blocks until
-     * execution completes.
+     * Submits the {@code bilinearZoom} kernel to the GPU and parks the calling
+     * thread until the GPU signals completion.
+     *
+     * <p>The carrier thread is released during GPU execution and may run other
+     * virtual threads. When the {@code VkFence} is signalled, {@link
+     * GpuCompletionScheduler} unparks this thread, which then downloads the
+     * result and frees device resources.
      *
      * @param memories the memory buffers bound to the kernel, in order:
      *                 {@code [0]} source pixels ({@code TO_DEVICE}),
@@ -130,8 +165,27 @@ final class KernelDispatcher {
      *                 {@code [2]} params ({@code TO_DEVICE}: srcWidth, srcHeight,
      *                 dstWidth, dstHeight)
      * @throws RuntimeException if any Vulkan call fails
+     * @throws fr.dufrenoy.hvt.error.HvtKernelException if the kernel signals error
      */
-    static synchronized void submit(HvtMemory<?>[] memories) {
+    static void submit(HvtMemory<?>[] memories) {
+        DispatchContext ctx;
+        synchronized (KernelDispatcher.class) {
+            ctx = beginDispatch(memories);
+        }
+        // Park the virtual thread; the carrier is free to run other threads
+        // until GpuCompletionScheduler signals the fence and calls unpark().
+        GpuCompletionScheduler.register(ctx.pFenceSlot(), ctx.done(), Thread.currentThread());
+        while (!ctx.done().get()) {
+            LockSupport.park();
+        }
+        synchronized (KernelDispatcher.class) {
+            finishDispatch(ctx, memories);
+        }
+    }
+
+    // ─── Phase 1 — setup and dispatch ────────────────────────────────────────
+
+    private static DispatchContext beginDispatch(HvtMemory<?>[] memories) {
         int[]         params   = (int[]) memories[2].get();
         long          srcBytes = memories[0].segment().byteSize();
         long          dstBytes = memories[1].segment().byteSize();
@@ -139,7 +193,7 @@ final class KernelDispatcher {
 
         try (Arena tmp = Arena.ofConfined()) {
 
-            // ── Step 2: allocate device buffers + device memory ───────────────
+            // ── Step 2: allocate device buffers ───────────────────────────────
             MemorySegment pSrcBuf = tmp.allocate(vulkan_h.C_POINTER);
             MemorySegment pSrcMem = tmp.allocate(vulkan_h.C_POINTER);
             allocateBuffer(tmp, dev, srcBytes, pSrcBuf, pSrcMem);
@@ -152,7 +206,7 @@ final class KernelDispatcher {
             MemorySegment dstBuf = pDstBuf.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
             MemorySegment dstMem = pDstMem.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
 
-            // ── Step 3: upload source pixels to device ────────────────────────
+            // ── Step 3: upload source pixels ─────────────────────────────────
             mapCopy(tmp, dev, srcMem, srcBytes, memories[0].segment(), true);
 
             // ── Step 3b: allocate and zero the error buffer (1 int) ──────────
@@ -173,8 +227,30 @@ final class KernelDispatcher {
             // ── Step 5: record command buffer ─────────────────────────────────
             MemorySegment pCmdBuf = tmp.allocate(vulkan_h.C_POINTER);
             recordCommandBuffer(tmp, dev, set, params, pCmdBuf);
+            MemorySegment cmdBuf = pCmdBuf.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
 
-            // ── Step 6: submit and wait ───────────────────────────────────────
+            // ── Step 6a: create fence in a shared arena ───────────────────────
+            // pFenceSlot must outlive this method (read by GpuCompletionScheduler
+            // from a different thread), so it lives in Arena.ofShared().
+            Arena fenceArena = Arena.ofShared();
+            MemorySegment pFenceSlot;
+            MemorySegment fence;
+            try {
+                MemorySegment fenceInfo = tmp.allocate(VkFenceCreateInfo.layout());
+                VkFenceCreateInfo.sType(fenceInfo, STYPE_FENCE_CREATE_INFO);
+                VkFenceCreateInfo.pNext(fenceInfo, MemorySegment.NULL);
+                VkFenceCreateInfo.flags(fenceInfo, 0); // unsignaled
+                pFenceSlot = fenceArena.allocate(vulkan_h.C_POINTER);
+                checkVulkan(
+                        vulkan_h.vkCreateFence(dev, fenceInfo, MemorySegment.NULL, pFenceSlot),
+                        "vkCreateFence");
+                fence = pFenceSlot.get(ValueLayout.ADDRESS, 0).reinterpret(Long.MAX_VALUE);
+            } catch (Throwable t) {
+                fenceArena.close();
+                throw t;
+            }
+
+            // ── Step 6b: submit with fence ────────────────────────────────────
             MemorySegment submitInfo = tmp.allocate(VkSubmitInfo.layout());
             VkSubmitInfo.sType(submitInfo, STYPE_SUBMIT_INFO);
             VkSubmitInfo.pNext(submitInfo, MemorySegment.NULL);
@@ -186,28 +262,49 @@ final class KernelDispatcher {
             VkSubmitInfo.signalSemaphoreCount(submitInfo, 0);
             VkSubmitInfo.pSignalSemaphores(submitInfo, MemorySegment.NULL);
             checkVulkan(
-                    vulkan_h.vkQueueSubmit(
-                            HvtCarrierRegistry.queue(), 1, submitInfo, MemorySegment.NULL),
+                    vulkan_h.vkQueueSubmit(HvtCarrierRegistry.queue(), 1, submitInfo, fence),
                     "vkQueueSubmit");
-            checkVulkan(vulkan_h.vkQueueWaitIdle(HvtCarrierRegistry.queue()), "vkQueueWaitIdle");
 
-            // ── Step 6b: read error code; skip output download if non-zero ───
-            MemorySegment errHostSeg = tmp.allocate(ValueLayout.JAVA_INT);
-            mapCopy(tmp, dev, errMem, 4L, errHostSeg, false);
-            HvtErrorBuffer.ofCode(errHostSeg.get(ValueLayout.JAVA_INT, 0)).checkAndThrow();
+            return new DispatchContext(
+                    fenceArena, pFenceSlot, fence,
+                    srcBuf, srcMem,
+                    dstBuf, dstMem, dstBytes,
+                    errBuf, errMem,
+                    pool, cmdBuf,
+                    new AtomicBoolean(false));
+        }
+    }
 
-            // ── Step 7: download output pixels from device ────────────────────
-            mapCopy(tmp, dev, dstMem, dstBytes, memories[1].segment(), false);
+    // ─── Phase 2 — result download and cleanup ────────────────────────────────
 
-            // ── Step 8: per-call cleanup ──────────────────────────────────────
-            vulkan_h.vkFreeCommandBuffers(dev, CMD_POOL, 1, pCmdBuf);
-            vulkan_h.vkDestroyDescriptorPool(dev, pool, MemorySegment.NULL);
-            vulkan_h.vkFreeMemory(dev, errMem, MemorySegment.NULL);
-            vulkan_h.vkDestroyBuffer(dev, errBuf, MemorySegment.NULL);
-            vulkan_h.vkFreeMemory(dev, srcMem, MemorySegment.NULL);
-            vulkan_h.vkDestroyBuffer(dev, srcBuf, MemorySegment.NULL);
-            vulkan_h.vkFreeMemory(dev, dstMem, MemorySegment.NULL);
-            vulkan_h.vkDestroyBuffer(dev, dstBuf, MemorySegment.NULL);
+    private static void finishDispatch(DispatchContext ctx, HvtMemory<?>[] memories) {
+        MemorySegment dev = HvtCarrierRegistry.device();
+        try {
+            try (Arena tmp = Arena.ofConfined()) {
+                // ── Step 6c: read error code ──────────────────────────────────
+                MemorySegment errHostSeg = tmp.allocate(ValueLayout.JAVA_INT);
+                mapCopy(tmp, dev, ctx.errMem(), 4L, errHostSeg, false);
+                try {
+                    HvtErrorBuffer.ofCode(errHostSeg.get(ValueLayout.JAVA_INT, 0)).checkAndThrow();
+                    // ── Step 7: download output (skipped if error) ────────────
+                    mapCopy(tmp, dev, ctx.dstMem(), ctx.dstBytes(), memories[1].segment(), false);
+                } finally {
+                    // ── Step 8: per-call cleanup (always runs) ────────────────
+                    MemorySegment pCmd = tmp.allocate(vulkan_h.C_POINTER);
+                    pCmd.set(ValueLayout.ADDRESS, 0, ctx.cmdBuf());
+                    vulkan_h.vkFreeCommandBuffers(dev, CMD_POOL, 1, pCmd);
+                    vulkan_h.vkDestroyDescriptorPool(dev, ctx.pool(), MemorySegment.NULL);
+                    vulkan_h.vkDestroyFence(dev, ctx.fence(), MemorySegment.NULL);
+                    vulkan_h.vkFreeMemory(dev, ctx.errMem(), MemorySegment.NULL);
+                    vulkan_h.vkDestroyBuffer(dev, ctx.errBuf(), MemorySegment.NULL);
+                    vulkan_h.vkFreeMemory(dev, ctx.srcMem(), MemorySegment.NULL);
+                    vulkan_h.vkDestroyBuffer(dev, ctx.srcBuf(), MemorySegment.NULL);
+                    vulkan_h.vkFreeMemory(dev, ctx.dstMem(), MemorySegment.NULL);
+                    vulkan_h.vkDestroyBuffer(dev, ctx.dstBuf(), MemorySegment.NULL);
+                }
+            }
+        } finally {
+            ctx.fenceArena().close();
         }
     }
 

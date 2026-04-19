@@ -131,7 +131,7 @@ types, but the runtime only routes to GPU in this prototype.
 |---|---|
 | `fr.dufrenoy.hvt.api` | Public HVT API: `HvtMemory`, `TransferMode`, `AcceleratorType`, `HvtThread` |
 | `fr.dufrenoy.hvt.kernel` | `KernelCompiler` — generates SPIR-V via Beehive |
-| `fr.dufrenoy.hvt.runtime` | `HvtCarrierRegistry`, `KernelDispatcher` — Vulkan Compute via Panama |
+| `fr.dufrenoy.hvt.runtime` | `HvtCarrierRegistry`, `KernelDispatcher`, `GpuCompletionScheduler`, `HvtBenchmark` — Vulkan Compute via Panama, async dispatch, JMH benchmark |
 | `fr.dufrenoy.hvt.runtime.vulkan` | Generated Panama/jextract bindings for Vulkan — do not edit |
 | `fr.dufrenoy.hvt.error` | `HvtErrorBuffer`, `HvtKernelException` |
 
@@ -188,12 +188,90 @@ Limitations (documented honestly in the paper):
 
 ---
 
+## Async GPU dispatch: VkFence + LockSupport.park()
+
+### Decision
+
+`KernelDispatcher.submit()` does not block the calling thread while the GPU
+executes. Instead, it registers a `VkFence` with `GpuCompletionScheduler`
+and parks the calling virtual thread with `LockSupport.park()`. The carrier
+thread is released during GPU execution and can run other virtual threads.
+`GpuCompletionScheduler` is a daemon platform thread that polls all
+in-flight fences using `vkWaitForFences(timeout=0)` and calls
+`LockSupport.unpark()` when a fence is signalled.
+
+### Rationale
+
+This is the core architectural claim of the HVT paper: a virtual thread
+parks on a hardware accelerator exactly as it parks on an I/O socket.
+The JVM carrier thread is freed during GPU execution — not blocked on
+`vkQueueWaitIdle`. The prototype demonstrates this claim end-to-end:
+two concurrent virtual threads can both park on the GPU simultaneously,
+with one carrier platform thread serving both.
+
+Without this, the prototype would show the right performance numbers but
+miss the key scheduling claim. With it, `KernelDispatcherIntegrationTest
+.two_virtual_threads_dispatch_concurrently` directly validates that both
+virtual threads park, both get correct results, and both complete correctly
+under concurrent access.
+
+### Implementation notes
+
+- `submit()` splits into two synchronized blocks (`beginDispatch` and
+  `finishDispatch`) with an unsynchronized park between them. The
+  Vulkan device lock is released before parking, allowing concurrent
+  dispatches.
+- The fence slot (`pFenceSlot`) is allocated in `Arena.ofShared()` because
+  `GpuCompletionScheduler` reads it from a different thread.
+- `AtomicBoolean done` protects against spurious `LockSupport.park()` wakeups:
+  `done` is set to `true` before `unpark()`, and `submit()` loops on
+  `while (!done.get())`.
+- `DispatchContext` is a private record in `KernelDispatcher` that carries
+  all Vulkan handles across the park boundary. Vulkan handles are opaque
+  values (addresses) that remain valid regardless of the Arena state.
+- The `cmdBuf` pointer slot is reconstructed in `finishDispatch` from a new
+  confined arena, because the original pointer slot in Phase 1's temp Arena
+  is closed before parking.
+
+### Alternative considered
+
+Polling (`vkQueueWaitIdle` in a loop with `Thread.yield()`).
+
+### Reason for rejection
+
+Polling burns CPU on the carrier thread and does not free it for other
+virtual threads. It would demonstrate concurrency correctness but not the
+scheduler claim.
+
+---
+
 ## Benchmark target
 
-The prototype must measure and log the wall-clock speedup of the
-`bilinearZoom` kernel on GPU vs. sequential CPU execution, for a
-representative image size (e.g. 3840×2160). This result will appear in
-the paper's Proof of Concept section.
+### Quick benchmark (BilinearZoomBenchmarkTest)
+
+Runs during `mvn test`. Measures wall-clock time for a single GPU dispatch
+and a single CPU execution for `bilinearZoom` on a 1920×1080 → 3840×2160
+image. Logs `[HVT Benchmark]` and `[HVT Batch Benchmark]` lines.
+
+Results on NVIDIA GTX 1080:
+- Single dispatch (full transfer round-trip): GPU ~185 ms vs CPU ~210 ms → ~2.4× speedup
+- Batch ×20 (device buffers persistent, transfer amortised): GPU ~13 ms/iter vs CPU ~208 ms/iter → ~15.5× speedup
+
+The single-dispatch figure is dominated by host↔device transfer time. The
+batch figure isolates GPU compute throughput.
+
+### JMH benchmark (HvtBenchmark)
+
+Produces `target/benchmarks.jar` via `mvn package`. Runs three benchmarks:
+`cpuSingle`, `gpuSingle`, and `gpuBatch` (×20, persistent device buffers).
+`@Setup(Level.Trial)` warms up the Vulkan driver with 3 dispatches, then
+calls `KernelDispatcher.submitTimed()` and logs a `[Phase breakdown]` line
+decomposing single-dispatch time into upload, compute, and download.
+
+`submitTimed()` uses blocking `vkQueueWaitIdle` (not the async path) because
+it is a measurement utility, not a concurrency primitive.
+
+Invocation: `java --enable-native-access=ALL-UNNAMED --enable-preview -jar target/benchmarks.jar`
 
 ---
 
@@ -201,8 +279,9 @@ the paper's Proof of Concept section.
 
 | Dependency | Role |
 |---|---|
-| Beehive SPIR-V Toolkit | SPIR-V code generation |
-| Vulkan (system) | GPU runtime — accessed via Panama |
-| JUnit 5 | Integration tests |
+| Beehive SPIR-V Toolkit (`beehive-spirv-lib:0.0.5`) | SPIR-V code generation — installed in local Maven repository |
+| Vulkan (system, SDK 1.4.341.1+) | GPU runtime — accessed via Panama |
+| JUnit 5.11.0 | Integration tests |
+| JMH 1.37 (`jmh-core`, `jmh-generator-annprocess`) | Microbenchmark harness |
 
 No other dependencies are permitted without explicit agreement.
