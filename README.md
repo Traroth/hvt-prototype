@@ -5,7 +5,7 @@
 `hvt-prototype` is a proof-of-concept supporting the research paper
 *Heterogeneous Virtual Threads: Extending Project Loom for First-Class Accelerator Support in the JVM*.
 
-It demonstrates the feasibility of the proposed HVT stack end-to-end:
+It demonstrates the feasibility of the proposed HVT approach on the GPU dispatch path:
 
 - A Java-defined compute kernel (`bilinearZoom`) compiled to SPIR-V via the [Beehive SPIR-V Toolkit](https://github.com/beehive-lab/beehive-spirv-toolkit)
 - Dispatch to a GPU via Vulkan Compute, using Project Panama (Foreign Function & Memory API, JEP 454)
